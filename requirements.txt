@@ -134,3 +134,5 @@ xxhash==3.6.0
 zstandard==0.25.0
 langfuse==4.0.0
 python-dotenv==1.2.2
+datasets>=3.0.0
+langchain-google-genai>=2.1.0

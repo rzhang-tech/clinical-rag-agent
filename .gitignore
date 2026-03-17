@@ -7,3 +7,7 @@ docs/
 __pycache__/
 .vscode/
 .env
+*.pyc
+eval_results/
+.cache/
+*.egg-info/

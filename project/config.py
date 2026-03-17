@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- Directory Configuration ---
 _BASE_DIR = os.path.dirname(__file__)
@@ -6,15 +9,21 @@ _BASE_DIR = os.path.dirname(__file__)
 MARKDOWN_DIR = os.path.join(_BASE_DIR, "markdown_docs")
 PARENT_STORE_PATH = os.path.join(_BASE_DIR, "parent_store")
 QDRANT_DB_PATH = os.path.join(_BASE_DIR, "qdrant_db")
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 
 # --- Qdrant Configuration ---
 CHILD_COLLECTION = "document_child_chunks"
 SPARSE_VECTOR_NAME = "sparse"
 
+# --- LLM Provider Configuration ---
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+
 # --- Model Configuration ---
 DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"
 SPARSE_MODEL = "Qdrant/bm25"
-LLM_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
+LLM_MODEL_GEMINI = "gemini-2.5-flash"
+LLM_MODEL_OLLAMA = "qwen3:4b-instruct-2507-q4_K_M"
 LLM_TEMPERATURE = 0
 
 # --- Agent Configuration ---

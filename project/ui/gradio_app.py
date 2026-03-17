@@ -39,7 +39,7 @@ def create_gradio_ui():
     def clear_chat_handler():
         chat_interface.clear_session()
     
-    with gr.Blocks(title="Agentic RAG") as demo:
+    with gr.Blocks(title="Clinical RAG Agent") as demo:
         
         with gr.Tab("Documents", elem_id="doc-management-tab"):
             gr.Markdown("## Add New Documents")
@@ -81,7 +81,7 @@ def create_gradio_ui():
         with gr.Tab("Chat"):
             chatbot = gr.Chatbot(
                 height=600, 
-                placeholder="Ask me anything about your documents!",
+                placeholder="Ask a clinical question based on the medical literature...",
                 show_label=False
             )
             chatbot.clear(clear_chat_handler)

@@ -2,23 +2,54 @@ from typing import List
 from langchain_core.tools import tool
 from db.parent_store_manager import ParentStoreManager
 
+try:
+    from fastembed import TextEmbedding
+    _reranker_available = True
+except ImportError:
+    _reranker_available = False
+
+
+def _cross_encoder_rerank(query: str, documents, top_k: int = 5):
+    """Rerank documents using a lightweight cross-encoder via fastembed."""
+    if not documents:
+        return documents
+
+    try:
+        from sentence_transformers import CrossEncoder
+        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        pairs = [(query, doc.page_content) for doc in documents]
+        scores = model.predict(pairs)
+
+        scored_docs = list(zip(documents, scores))
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        return [doc for doc, _ in scored_docs[:top_k]]
+    except Exception:
+        # Fallback: return original order if reranker fails
+        return documents[:top_k]
+
+
 class ToolFactory:
-    
+
     def __init__(self, collection):
         self.collection = collection
         self.parent_store_manager = ParentStoreManager()
-    
+
     def _search_child_chunks(self, query: str, limit: int) -> str:
         """Search for the top K most relevant child chunks.
-        
+
         Args:
             query: Search query string
             limit: Maximum number of results to return
         """
         try:
-            results = self.collection.similarity_search(query, k=limit, score_threshold=0.7)
+            # Over-fetch then rerank for better precision
+            fetch_k = max(limit * 3, 15)
+            results = self.collection.similarity_search(query, k=fetch_k, score_threshold=0.4)
             if not results:
                 return "NO_RELEVANT_CHUNKS"
+
+            # Rerank to get the most relevant results
+            results = _cross_encoder_rerank(query, results, top_k=limit)
 
             return "\n\n".join([
                 f"Parent ID: {doc.metadata.get('parent_id', '')}\n"
