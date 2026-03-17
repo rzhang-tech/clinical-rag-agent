@@ -11,3 +11,4 @@ __pycache__/
 eval_results/
 .cache/
 *.egg-info/
+.claude/

@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "WebSearch",
-      "Bash(python -c \"from datasets import load_dataset; ds = load_dataset\\(''openlifescienceai/medqa'', split=''test''\\); print\\(ds.column_names\\); print\\(ds[0]\\)\")"
-    ]
-  }
-}
