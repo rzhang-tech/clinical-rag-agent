@@ -29,13 +29,13 @@
 
 **Clinical RAG Agent** is an agentic retrieval-augmented generation system designed for **medical literature question answering**. It ingests medical textbooks and clinical documents, then answers queries grounded strictly in the source material with full source attribution.
 
-Built on [LangGraph](https://github.com/langchain-ai/langgraph), the system uses an autonomous agent loop with tool-calling to search, retrieve, rerank, and synthesize answers from a knowledge base of 50K+ medical text chunks.
+Built on [LangGraph](https://github.com/langchain-ai/langgraph), the system uses an autonomous agent loop with tool-calling to search, retrieve, rerank, and synthesize answers from a knowledge base of 340K+ medical text chunks from 18 textbooks.
 
 ### Key Highlights
 
-- **87% accuracy** on in-knowledge-base MedQA (USMLE) questions
+- **80% accuracy on 100 USMLE-style questions** from MedQA benchmark
 - **Hybrid retrieval** (dense + sparse) with cross-encoder reranking
-- **50K+ chunks** from 5 authoritative medical textbooks via [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG)
+- **340K+ chunks** from 18 authoritative medical textbooks via [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG)
 - **Strict grounding** &mdash; refuses to answer when evidence is insufficient
 - **Automated evaluation pipeline** with iterative optimization (65% &rarr; 80% overall accuracy across 3 iterations)
 
@@ -114,13 +114,22 @@ Query --> Hybrid Search (dense + BM25) --> Over-fetch 3x candidates
 
 ### Benchmark: MedQA (USMLE-style)
 
-Evaluated on 20 questions (15 in-KB + 5 out-KB) from the [MedQA](https://github.com/jind11/MedQA) dataset.
+#### Iterative Optimization (20-question subset)
 
-| Metric | v1 (Baseline) | v2 | v3 (Final) |
+| Metric | v1 (Baseline) | v2 | v3 |
 |--------|:---:|:---:|:---:|
 | **In-KB Accuracy** | 67% | 80% | **87%** |
 | **Overall Accuracy** | 65% | 75% | **80%** |
 | **Avg Time/Question** | 32.1s | 35.3s | **26.4s** |
+
+#### Scaled Evaluation (100 questions, 18 textbooks)
+
+| Metric | Result |
+|--------|:---:|
+| **Overall Accuracy** | **80%** |
+| **In-KB Accuracy** | 78% (62/80) |
+| **Source Attribution** | 86% (69/80) |
+| **Avg Time/Question** | 26.0s |
 
 ### Optimization Journey
 
@@ -141,25 +150,38 @@ Run the evaluation yourself:
 
 ```bash
 cd project
-python scripts/evaluate.py              # Full evaluation (20 questions)
-python scripts/evaluate.py --dry-run    # Preview questions only
-python scripts/evaluate.py --num-in-kb 30 --num-out-kb 10  # Custom size
+python scripts/evaluate.py                                   # Full evaluation (100 questions)
+python scripts/evaluate.py --dry-run                         # Preview questions only
+python scripts/evaluate.py --num-in-kb 80 --num-out-kb 20   # Custom size
 ```
 
 ## Knowledge Base
 
 The knowledge base is built from [MedRAG/textbooks](https://huggingface.co/datasets/MedRAG/textbooks), a curated collection of medical textbook content.
 
-### Included Textbooks
+### Included Textbooks (18)
 
 | Textbook | Domain | Chunks |
 |----------|--------|--------|
-| Harrison's Principles of Internal Medicine | Internal Medicine | 32,628 |
+| Harrison's (Internal Medicine) | Internal Medicine | 32,628 |
+| Surgery (Schwartz) | Surgery | 14,349 |
+| Neurology (Adams) | Neurology | 12,370 |
+| Obstetrics (Williams) | Obstetrics | 9,166 |
+| Gynecology (Novak) | Gynecology | 7,947 |
 | Pharmacology (Katzung) | Pharmacology | 7,356 |
+| Cell Biology (Alberts) | Cell Biology | 7,070 |
 | Pathology (Robbins) | Pathology | 5,297 |
+| Immunology (Janeway) | Immunology | 4,852 |
+| Histology (Ross) | Histology | 4,411 |
+| Physiology (Levy) | Physiology | 4,370 |
+| Pediatrics (Nelson) | Pediatrics | 4,260 |
+| Psychiatry (DSM-5) | Psychiatry | 4,057 |
 | Anatomy (Gray's) | Anatomy | 3,017 |
-| First Aid for the USMLE Step 2 | Clinical Review | 1,369 |
-| **Total** | | **~50K chunks** |
+| Biochemistry (Lippincott) | Biochemistry | 1,973 |
+| First Aid Step 2 | Clinical Review | 1,369 |
+| First Aid Step 1 | Basic Sciences | 850 |
+| Pathoma (Husain) | Pathology | 505 |
+| **Total** | **18 textbooks** | **125K raw &rarr; 340K+ indexed chunks** |
 
 ### Import More Textbooks
 
@@ -215,7 +237,7 @@ docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdran
 
 ```bash
 cd project
-python scripts/import_medrag.py --titles Anatomy_Gray InternalMed_Harrison Pathology_Robbins Pharmacology_Katzung First_Aid_Step2
+python scripts/import_medrag.py --titles Anatomy_Gray InternalMed_Harrison Pathology_Robbins Pharmacology_Katzung First_Aid_Step2 Neurology_Adams Surgery_Schwartz Pediatrics_Nelson Immunology_Janeway Histology_Ross Gynecology_Novak Obstentrics_Williams Psichiatry_DSM-5 Biochemistry_Lippinco Cell_Biology_Alberts Physiology_Levy First_Aid_Step1 Pathoma_Husain
 ```
 
 ### Run
