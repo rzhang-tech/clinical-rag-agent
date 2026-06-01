@@ -278,34 +278,46 @@ def run_evaluation(num_in_kb: int = 15, num_out_kb: int = 5, dry_run: bool = Fal
     print(f"  Accuracy:         {total_correct}/{len(results)} ({overall_accuracy:.0f}%)")
     print(f"  Avg Time/Question: {avg_time:.1f}s")
 
-    # Save detailed results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    metrics = {
+        "num_in_kb": num_in_kb,
+        "num_out_kb": num_out_kb,
+        "in_kb_accuracy": round(in_kb_accuracy, 1),
+        "in_kb_source_rate": round(in_kb_with_sources / len(in_kb) * 100, 1) if in_kb else 0,
+        "out_kb_refusal_rate": round(boundary_rate, 1),
+        "overall_accuracy": round(overall_accuracy, 1),
+        "avg_time_seconds": round(avg_time, 1),
+    }
+
+    # Persist to PostgreSQL
+    try:
+        from db.postgres_manager import PostgresManager
+        pg = PostgresManager()
+        pg.connect()
+        pg.save_eval_run(run_id=timestamp, timestamp=datetime.now().isoformat(), metrics=metrics)
+        pg.save_eval_results(run_id=timestamp, results=results)
+        pg.close()
+        print(f"\n✅ Metrics saved to PostgreSQL (run_id={timestamp})")
+    except Exception as exc:
+        print(f"\n⚠️  PostgreSQL unavailable — metrics not persisted: {exc}")
+
+    # Also save JSON as backup
     output_dir = os.path.join(os.path.dirname(__file__), "..", "eval_results")
     os.makedirs(output_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(output_dir, f"eval_{timestamp}.json")
 
     report = {
         "timestamp": timestamp,
-        "config": {
-            "num_in_kb": num_in_kb,
-            "num_out_kb": num_out_kb,
-            "score_threshold": 0.5,
-        },
-        "metrics": {
-            "in_kb_accuracy": round(in_kb_accuracy, 1),
-            "in_kb_source_rate": round(in_kb_with_sources / len(in_kb) * 100, 1) if in_kb else 0,
-            "out_kb_refusal_rate": round(boundary_rate, 1),
-            "overall_accuracy": round(overall_accuracy, 1),
-            "avg_time_seconds": round(avg_time, 1),
-        },
+        "config": {"num_in_kb": num_in_kb, "num_out_kb": num_out_kb, "score_threshold": 0.5},
+        "metrics": metrics,
         "results": results,
     }
 
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
-    print(f"\n💾 Detailed results saved to: {output_file}")
+    print(f"💾 JSON backup saved to: {output_file}")
     print("=" * 60)
 
 

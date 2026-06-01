@@ -1,0 +1,103 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+\usepackage{cvpr}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage[utf8]{inputenc}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\setlength{\columnsep}{0.2in}
+\setlength{\parindent}{1.5em}
+\setlength{\parskip}{0pt}
+\usepackage{indentfirst}
+
+% Compact title spacing
+\makeatletter
+\def\@maketitle{%
+  \newpage
+  \null
+  \vskip -0.4in
+  \begin{center}%
+    {\Large\bfseries \@title \par}%
+    \vskip 0.3em%
+    {\large
+      \lineskip .4em%
+      \begin{tabular}[t]{c}%
+        \@author
+      \end{tabular}\par}%
+  \end{center}%
+  \par
+  \vskip 0.2em}
+\makeatother
+
+% Tighter section spacing
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {5pt plus 2pt minus 2pt}{3pt plus 1pt minus 0pt}%
+  {\large\bfseries}}
+\makeatother
+
+\begin{document}
+
+\title{A Minimal LLM-Based Agent for Medical Visual Question Answering}
+\author{Ruoyu Zhang \quad Xu Chen\\
+Auburn University, Auburn, AL, USA\\
+{\tt\small \{ruz0002, xzc0066\}@auburn.edu}
+}
+\maketitle
+
+\vspace{-2pt}
+\section{Introduction}
+
+Medical Visual Question Answering (Med-VQA) requires integrating visual understanding of medical images with clinical domain knowledge. Current approaches often use fixed pipelines where each step is hardcoded in sequence, offering no ability to adapt the reasoning process based on intermediate results.
+
+This project builds a \textbf{minimal LLM-based agent} for Med-VQA. Unlike fixed pipelines, an agent dynamically plans its next action, selects and calls appropriate tools, and maintains short-term memory across reasoning steps. We extend an existing RAG-based Med-VQA system into an agentic architecture and analyze the failure modes of the agent loop in the medical domain. Key references include ReAct~\cite{yao2023react} for the reasoning-and-acting paradigm, LLaVA-Med~\cite{li2024llavamed} for biomedical vision-language understanding, MedRAG~\cite{xiong2024benchmarking} for medical RAG, and RAG~\cite{lewis2020retrieval} for the foundational retrieval-augmented generation framework.
+
+\section{Problem Statement}
+
+We upgrade an existing linear Med-VQA pipeline into a minimal agentic system with four core components:
+
+\textbf{(1) Planner.} A general-purpose LLM (Gemini API) examines the current agent state and decides the next action: analyze the image, retrieve literature, request more information, or generate a diagnosis.
+
+\textbf{(2) Tool Calling.} The planner dispatches to specialized tools: (a)~\textit{Image Analysis}---LLaVA-Med~\cite{li2024llavamed}, a biomedical vision-language model running locally on GPU; (b)~\textit{Knowledge Retrieval}---a RAG module using MedCPT embeddings and FAISS over a 465K-document knowledge base; (c)~\textit{Follow-up}---requesting additional clinical information when needed.
+
+\textbf{(3) Short-term Memory.} The agent maintains a state object that accumulates across iterations: image analysis results, retrieved documents, previous diagnosis attempts with rejection reasons, and a confidence score.
+
+\textbf{(4) Self-Reflection Loop.} After generating a diagnosis, a self-check module evaluates consistency between the diagnosis and retrieved evidence. If confidence is low, the agent loops back for additional retrieval or analysis.
+
+The agent is implemented using LangGraph with conditional edges for dynamic routing. The key research question is: \textit{What are the failure modes when applying agentic workflows to medical diagnosis?}
+
+\section{Data}
+
+\textbf{Evaluation Dataset.} We use VQA-RAD~\cite{lau2018dataset}, containing 315 radiology images with 3,515 clinician-generated questions spanning CT, MRI, and X-ray modalities. The test set has 451 question-answer pairs (56\% yes/no, 44\% open-ended).
+
+\textbf{Knowledge Base.} A 465,640-snippet medical knowledge base from StatPearls (339K articles from NCBI) and 18 medical textbooks (126K snippets from MedRAG~\cite{xiong2024benchmarking}), encoded with MedCPT (768-dim) and indexed with FAISS.
+
+\section{Evaluation}
+
+\textbf{Quantitative.} (1)~Accuracy on VQA-RAD (overall, yes/no, and open-ended), compared across the agent, a fixed RAG pipeline, and a no-retrieval baseline. (2)~Agent efficiency: average loop iterations, tool calling distribution, and latency. (3)~Self-reflection effectiveness: re-retrieval trigger rate and accuracy impact.
+
+\textbf{Qualitative.} A failure mode taxonomy covering: planning errors (wrong tool selection), retrieval failures (irrelevant documents), hallucinated diagnoses passing self-check, infinite loops (confidence never converges), and confidence calibration errors, with case studies of representative reasoning chains.
+
+\section{Timeline}
+
+\textbf{Week 1}: Implement the agent framework using LangGraph; define tool interfaces wrapping LLaVA-Med and MedCPT/FAISS retrieval; implement the planner node with structured output.
+\textbf{Week 2}: Add the self-reflection loop and short-term memory; run the agent on VQA-RAD; compare agent vs.\ fixed pipeline vs.\ no-retrieval baseline.
+\textbf{Week 3}: Failure mode analysis with case studies; final report and presentation.
+
+\vspace{-2pt}
+{\small
+\bibliographystyle{ieee_fullname}
+\begin{thebibliography}{5}
+\setlength{\itemsep}{0pt}
+\setlength{\parsep}{0pt}
+\bibitem{yao2023react} S.~Yao et al., ``ReAct: Synergizing Reasoning and Acting in Language Models,'' \textit{ICLR}, 2023.
+\bibitem{li2024llavamed} C.~Li et al., ``LLaVA-Med: Training a Large Language-and-Vision Assistant for Biomedicine in One Day,'' \textit{NeurIPS}, 2023.
+\bibitem{xiong2024benchmarking} G.~Xiong et al., ``Benchmarking Retrieval-Augmented Generation for Medicine,'' \textit{ACL Findings}, 2024.
+\bibitem{lewis2020retrieval} P.~Lewis et al., ``Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks,'' \textit{NeurIPS}, 2020.
+\bibitem{lau2018dataset} J.~J.~Lau et al., ``A Dataset of Clinically Generated Visual Questions and Answers about Radiology Images,'' \textit{Scientific Data}, 2018.
+\end{thebibliography}
+}
+
+\end{document}

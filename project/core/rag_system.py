@@ -1,15 +1,21 @@
 import uuid
+import logging
+from typing import Optional
+
 import config
 from db.vector_db_manager import VectorDbManager
 from db.parent_store_manager import ParentStoreManager
+from db.postgres_manager import PostgresManager
+from db.cache_manager import CacheManager
 from document_chunker import DocumentChuncker
 from rag_agent.tools import ToolFactory
 from rag_agent.graph import create_agent_graph
 from core.observability import Observability
 
+logger = logging.getLogger(__name__)
+
 
 def _create_llm():
-    """Create LLM based on provider config."""
     if config.LLM_PROVIDER == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
@@ -27,25 +33,38 @@ def _create_llm():
 
 class RAGSystem:
 
-    def __init__(self, collection_name=config.CHILD_COLLECTION):
+    def __init__(self, collection_name: str = config.CHILD_COLLECTION):
         self.collection_name = collection_name
-        self.vector_db = VectorDbManager()
-        self.parent_store = ParentStoreManager()
+        self.pg = PostgresManager()
+        self.cache = CacheManager()
+        self.vector_db = VectorDbManager(cache=self.cache)
+        self.parent_store = ParentStoreManager(pg=self.pg)
         self.chunker = DocumentChuncker()
         self.observability = Observability()
         self.agent_graph = None
         self.thread_id = str(uuid.uuid4())
         self.recursion_limit = config.GRAPH_RECURSION_LIMIT
 
-    def initialize(self):
+    def initialize(self) -> None:
+        # Connect backing services
+        try:
+            self.pg.connect()
+        except Exception as exc:
+            logger.warning("PostgreSQL unavailable at startup: %s — parent store may fail", exc)
+
+        try:
+            self.cache.connect()
+        except Exception as exc:
+            logger.warning("Redis unavailable at startup: %s — caching disabled", exc)
+
         self.vector_db.create_collection(self.collection_name)
         collection = self.vector_db.get_collection(self.collection_name)
 
         llm = _create_llm()
-        tools = ToolFactory(collection).create_tools()
+        tools = ToolFactory(collection, cache=self.cache).create_tools()
         self.agent_graph = create_agent_graph(llm, tools)
-        
-    def get_config(self):
+
+    def get_config(self) -> dict:
         cfg = {
             "configurable": {"thread_id": self.thread_id},
             "recursion_limit": self.recursion_limit,
@@ -54,10 +73,25 @@ class RAGSystem:
         if handler:
             cfg["callbacks"] = [handler]
         return cfg
-    
-    def reset_thread(self):
+
+    def reset_thread(self) -> None:
         try:
             self.agent_graph.checkpointer.delete_thread(self.thread_id)
-        except Exception as e:
-            print(f"Warning: Could not delete thread {self.thread_id}: {e}")
+        except Exception as exc:
+            logger.warning("Could not delete thread %s: %s", self.thread_id, exc)
         self.thread_id = str(uuid.uuid4())
+
+
+# ------------------------------------------------------------------ #
+# Process-level singleton                                              #
+# ------------------------------------------------------------------ #
+
+_instance: Optional[RAGSystem] = None
+
+
+def get_rag_system() -> RAGSystem:
+    global _instance
+    if _instance is None:
+        _instance = RAGSystem()
+        _instance.initialize()
+    return _instance

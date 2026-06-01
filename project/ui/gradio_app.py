@@ -1,12 +1,11 @@
 import gradio as gr
 from core.chat_interface import ChatInterface
 from core.document_manager import DocumentManager
-from core.rag_system import RAGSystem
+from core.rag_system import get_rag_system
 
 def create_gradio_ui():
-    rag_system = RAGSystem()
-    rag_system.initialize()
-    
+    rag_system = get_rag_system()
+
     doc_manager = DocumentManager(rag_system)
     chat_interface = ChatInterface(rag_system)
     

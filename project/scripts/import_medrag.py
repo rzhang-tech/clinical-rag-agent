@@ -178,8 +178,11 @@ def main():
         from db.vector_db_manager import VectorDbManager
         from db.parent_store_manager import ParentStoreManager
 
+        from db.cache_manager import CacheManager
         print("Initializing vector database and parent store...")
-        vector_db = VectorDbManager()
+        cache = CacheManager()
+        cache.connect()
+        vector_db = VectorDbManager(cache=cache)
         vector_db.create_collection(config.CHILD_COLLECTION)
         collection = vector_db.get_collection(config.CHILD_COLLECTION)
         parent_store = ParentStoreManager()

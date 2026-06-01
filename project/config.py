@@ -9,7 +9,7 @@ _BASE_DIR = os.path.dirname(__file__)
 MARKDOWN_DIR = os.path.join(_BASE_DIR, "markdown_docs")
 PARENT_STORE_PATH = os.path.join(_BASE_DIR, "parent_store")
 QDRANT_DB_PATH = os.path.join(_BASE_DIR, "qdrant_db")
-QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+QDRANT_URL = os.environ.get("QDRANT_URL", "")  # empty = use local path mode
 
 # --- Qdrant Configuration ---
 CHILD_COLLECTION = "document_child_chunks"
@@ -43,6 +43,14 @@ HEADERS_TO_SPLIT_ON = [
     ("##", "H2"),
     ("###", "H3")
 ]
+
+# --- PostgreSQL Configuration ---
+POSTGRES_URL = os.environ.get("POSTGRES_URL", "postgresql://postgres:password@localhost:5432/clinical_rag")
+
+# --- Redis Configuration ---
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+REDIS_EMBEDDING_TTL = None   # embeddings are deterministic — cache forever
+REDIS_LLM_TTL = 3600         # LLM responses: 1-hour TTL
 
 # --- Langfuse Observability ---
 LANGFUSE_ENABLED = os.environ.get("LANGFUSE_ENABLED", "false").lower() == "true"
