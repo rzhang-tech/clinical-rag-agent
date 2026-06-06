@@ -1,169 +1,254 @@
 <h1 align="center">Clinical RAG Agent</h1>
 
 <p align="center">
-  <strong>An agentic RAG system for medical literature question-answering, powered by LangGraph</strong>
+  <strong>Production-ready agentic RAG system for medical literature Q&A — powered by LangGraph, FastAPI, and PostgreSQL</strong>
 </p>
 
 <p align="center">
   <a href="#overview">Overview</a> &bull;
-  <a href="#features">Features</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
+  <a href="#api">API</a> &bull;
   <a href="#evaluation">Evaluation</a> &bull;
-  <a href="#installation">Installation</a> &bull;
-  <a href="#usage">Usage</a> &bull;
-  <a href="#configuration">Configuration</a>
+  <a href="#quickstart">Quickstart</a> &bull;
+  <a href="#deployment">Deployment</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white" alt="Python"/>
-  <img src="https://img.shields.io/badge/LangGraph-1.0%2B-orange?logo=langchain&logoColor=white" alt="LangGraph"/>
-  <img src="https://img.shields.io/badge/Qdrant-vector%20db-DC244C" alt="Qdrant"/>
-  <img src="https://img.shields.io/badge/Gemini%202.5-Flash-4285F4?logo=google&logoColor=white" alt="Gemini"/>
-  <img src="https://img.shields.io/badge/domain-clinical%20medicine-red" alt="Clinical Medicine"/>
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License"/>
+  <img src="https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=white"/>
+  <img src="https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white"/>
+  <img src="https://img.shields.io/badge/LangGraph-1.0%2B-orange?logo=langchain&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Qdrant-vector%20db-DC244C"/>
+  <img src="https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Redis-cache-DC382D?logo=redis&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Gemini%202.5-Flash-4285F4?logo=google&logoColor=white"/>
+  <img src="https://img.shields.io/badge/license-MIT-green"/>
+</p>
+
+<p align="center">
+  <strong>🚀 Live demo coming soon — AWS deployment in progress</strong>
 </p>
 
 ---
 
 ## Overview
 
-**Clinical RAG Agent** is an agentic retrieval-augmented generation system designed for **medical literature question answering**. It ingests medical textbooks and clinical documents, then answers queries grounded strictly in the source material with full source attribution.
+**Clinical RAG Agent** is a production-ready retrieval-augmented generation backend for medical literature question answering. It ingests clinical textbooks, indexes them into a hybrid vector store, and answers queries with full source attribution — grounded strictly in the evidence.
 
-Built on [LangGraph](https://github.com/langchain-ai/langgraph), the system uses an autonomous agent loop with tool-calling to search, retrieve, rerank, and synthesize answers from a knowledge base of 340K+ medical text chunks from 18 textbooks.
+Built on [LangGraph](https://github.com/langchain-ai/langgraph) with an async [FastAPI](https://fastapi.tiangolo.com/) backend, PostgreSQL persistence, and Redis caching, the system is containerized with Docker and designed for cloud deployment.
 
-### Key Highlights
+### Highlights
 
-- **80% accuracy on 100 USMLE-style questions** from MedQA benchmark
-- **Hybrid retrieval** (dense + sparse) with cross-encoder reranking
-- **340K+ chunks** from 18 authoritative medical textbooks via [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG)
-- **Strict grounding** &mdash; refuses to answer when evidence is insufficient
-- **Automated evaluation pipeline** with iterative optimization (65% &rarr; 80% overall accuracy across 3 iterations)
+- **87% accuracy on USMLE-style MedQA** benchmark (in-KB questions)
+- **11-node LangGraph state machine** with conditional routing, context compression, and retry logic
+- **Hybrid retrieval** (dense + BM25) with cross-encoder reranking over 350K+ indexed chunks
+- **Redis-backed cache** for embeddings and LLM responses — cuts repeat-query latency significantly
+- **PostgreSQL** for parent chunk storage and evaluation metrics tracking
+- **REST API + SSE streaming** — `/api/chat`, `/api/chat/stream`, `/api/documents`
+- **Automated evaluation pipeline** with PostgreSQL metrics tracking (67% → 87% across 3 optimization cycles)
 
-> **Disclaimer**: This tool is for **research and educational purposes only**. It is NOT a substitute for professional medical judgment. Always consult qualified healthcare professionals for clinical decisions.
+> **Disclaimer**: For research and educational purposes only. Not a substitute for professional medical judgment.
 
-## Features
-
-| Feature | Description |
-|---|---|
-| **Hierarchical Indexing** | Parent-child chunking optimized for structured medical documents (sections, subsections) |
-| **Hybrid Retrieval** | Dense (semantic) + Sparse (BM25) search via Qdrant for high-precision medical term matching |
-| **Cross-Encoder Reranking** | Over-fetches 3x candidates then reranks with `ms-marco-MiniLM-L-6-v2` for better precision |
-| **Medical-Aware Prompts** | System prompts tuned for clinical terminology, evidence grading, and safety-conscious responses |
-| **Conversation Memory** | Multi-turn dialogue with context preservation for iterative clinical queries |
-| **Query Clarification** | Rewrites ambiguous queries or asks for clarification (e.g., drug name disambiguation) |
-| **Multi-Query Decomposition** | Splits complex clinical questions into parallel sub-queries, then aggregates |
-| **Self-Correction** | Re-queries with broader/alternative terms if initial retrieval is insufficient |
-| **Context Compression** | Keeps working memory lean across long retrieval loops |
-| **Source Attribution** | Every answer cites the source document (textbook, guideline, paper) |
-| **Automated Evaluation** | MedQA-based benchmark pipeline with accuracy, source grounding, and boundary awareness metrics |
-| **Observability** | Optional Langfuse tracing for debugging and monitoring |
+---
 
 ## Architecture
 
+### System Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FastAPI Backend                       │
+│                                                          │
+│   POST /api/chat          POST /api/chat/stream          │
+│   GET  /api/documents     POST /api/documents/upload     │
+│   GET  /api/health                                       │
+│                        │                                 │
+│            ┌───────────▼────────────┐                   │
+│            │   Redis LLM Cache      │ ← cache hit?      │
+│            └───────────┬────────────┘                   │
+│                        │ miss                            │
+│            ┌───────────▼────────────┐                   │
+│            │   LangGraph Agent      │                    │
+│            └───────────┬────────────┘                   │
+└────────────────────────┼────────────────────────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼               ▼               ▼
+    ┌─────────┐    ┌──────────┐    ┌──────────┐
+    │ Qdrant  │    │PostgreSQL│    │  Redis   │
+    │ Vectors │    │  Chunks  │    │Emb Cache │
+    └─────────┘    └──────────┘    └──────────┘
+```
+
+### LangGraph State Machine (11 nodes)
+
 ```
 User Query
-    |
-    v
-+-------------------+
-| Summarize History |  <-- Compress prior conversation
-+---------+---------+
-          |
-          v
-+-------------------+
-|  Rewrite Query    |  <-- Normalize medical terminology, split multi-part questions
-+---------+---------+
-          |
-          v
-+-------------------+
-|  Route            |  <-- Clear? --> Fan-out agents  |  Unclear? --> Ask user
-+---------+---------+
-          |
-          v
-+---------------------------------------+
-|  Agent Subgraph (per sub-question)    |
-|                                       |
-|  Orchestrator --> Tools --> Rerank    |
-|       ^                    |          |
-|       |   Compress Context |          |
-|       +--------------------+          |
-|                                       |
-|  Tools:                               |
-|    - search_child_chunks (hybrid)     |
-|    - retrieve_parent_chunks           |
-|    - cross-encoder reranking          |
-+------------------+--------------------+
-                   |
-                   v
-+-------------------+
-| Aggregate         |  <-- Combine sub-answers into final response
-+---------+---------+
-          |
-          v
-   Final Answer + Sources
+    │
+    ▼
+[summarize_history] ──► [rewrite_query] ──► [request_clarification]?
+                               │
+                    ┌──────────▼──────────┐
+                    │   Agent Subgraph     │
+                    │                      │
+                    │  [orchestrator]      │
+                    │      │  ▲            │
+                    │      ▼  │            │
+                    │  [tools] (hybrid     │
+                    │   search + rerank)   │
+                    │      │               │
+                    │      ▼               │
+                    │  [should_compress]   │
+                    │      │               │
+                    │  [compress_context]──┘
+                    │      │
+                    │  [fallback_response]
+                    │      │
+                    │  [collect_answer]
+                    └──────┬──────────────┘
+                           │
+                    [aggregate_answers]
+                           │
+                    Final Answer + Sources
 ```
 
 ### Retrieval Pipeline
 
 ```
-Query --> Hybrid Search (dense + BM25) --> Over-fetch 3x candidates
-      --> Cross-Encoder Rerank (ms-marco-MiniLM-L-6-v2) --> Top-K results
-      --> Retrieve Parent Chunks --> LLM Synthesis --> Answer
+Query
+  │
+  ▼
+Redis Embedding Cache ──hit──► [cached vector]
+  │ miss
+  ▼
+HuggingFace all-mpnet-base-v2 (768-dim dense)
+  +
+Qdrant/BM25 (sparse)
+  │
+  ▼
+Hybrid Search → over-fetch 3× candidates
+  │
+  ▼
+cross-encoder/ms-marco-MiniLM-L-6-v2 reranking → top-5
+  │
+  ▼
+Retrieve Parent Chunks (PostgreSQL)
+  │
+  ▼
+LLM Synthesis (Gemini 2.5 Flash)
+  │
+  ▼
+Answer + Source Citations
 ```
+
+---
+
+## API
+
+The FastAPI backend exposes a REST API alongside the Gradio UI.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/health` | Service health check (Qdrant, PostgreSQL, Redis) |
+| `POST` | `/api/chat` | Synchronous Q&A |
+| `POST` | `/api/chat/stream` | Server-Sent Events streaming response |
+| `POST` | `/api/chat/reset` | Reset conversation session |
+| `GET` | `/api/documents` | List indexed documents |
+| `POST` | `/api/documents/upload` | Upload PDF or Markdown |
+| `DELETE` | `/api/documents` | Clear knowledge base |
+
+```bash
+# Example
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What are the main causes of myocardial infarction?"}'
+```
+
+Interactive API docs: `http://localhost:8000/docs`
+
+---
 
 ## Evaluation
 
-### Benchmark: MedQA (USMLE-style)
+### MedQA Benchmark (USMLE-style)
 
 #### Iterative Optimization (20-question subset)
 
-| Metric | v1 (Baseline) | v2 | v3 |
-|--------|:---:|:---:|:---:|
+| Metric | v1 Baseline | v2 | v3 |
+|--------|:-----------:|:--:|:--:|
 | **In-KB Accuracy** | 67% | 80% | **87%** |
 | **Overall Accuracy** | 65% | 75% | **80%** |
-| **Avg Time/Question** | 32.1s | 35.3s | **26.4s** |
+| **Avg Time / Question** | 32.1s | 35.3s | 26.4s |
 
 #### Scaled Evaluation (100 questions, 18 textbooks)
 
 | Metric | Result |
-|--------|:---:|
+|--------|:------:|
 | **Overall Accuracy** | **80%** |
 | **In-KB Accuracy** | 78% (62/80) |
 | **Source Attribution** | 86% (69/80) |
-| **Avg Time/Question** | 26.0s |
+| **Avg Time / Question** | 26.0s |
 
-### Optimization Journey
-
-| Iteration | Changes | Impact |
-|-----------|---------|--------|
-| **v1 &rarr; v2** | Added cross-encoder reranker, lowered score threshold (0.7 &rarr; 0.4), strengthened grounding prompts | +13% in-KB accuracy |
-| **v2 &rarr; v3** | Balanced grounding rules (allow reasoning over retrieved content, not just verbatim matching), improved answer format extraction | +7% in-KB accuracy, reduced UNKNOWN responses |
-
-### Evaluation Dimensions
-
-| Dimension | What it measures | Why it matters |
-|-----------|------------------|----------------|
-| **In-KB Accuracy** | Correct answers when relevant documents exist | Core retrieval + reasoning quality |
-| **Source Grounding** | Answers cite source documents | Evidence traceability |
-| **Boundary Awareness** | Refuses to answer when no relevant documents exist | Safety &mdash; prevents hallucinated medical advice |
-
-Run the evaluation yourself:
+Evaluation results are persisted to PostgreSQL (`eval_runs` + `eval_results` tables) for tracking across optimization cycles.
 
 ```bash
-cd project
-python scripts/evaluate.py                                   # Full evaluation (100 questions)
-python scripts/evaluate.py --dry-run                         # Preview questions only
-python scripts/evaluate.py --num-in-kb 80 --num-out-kb 20   # Custom size
+python scripts/evaluate.py                          # 100 questions (default)
+python scripts/evaluate.py --num-in-kb 15 --num-out-kb 5
+python scripts/evaluate.py --dry-run                # preview only
 ```
+
+---
+
+## Quickstart
+
+### Option A — Docker Compose (recommended)
+
+```bash
+git clone https://github.com/rzhang-tech/clinical-rag-agent.git
+cd clinical-rag-agent
+
+# Set your API key
+echo "GOOGLE_API_KEY=your-key-here" > .env
+
+# Start all services (app + Qdrant + PostgreSQL + Redis)
+docker compose up -d --build
+
+# Import knowledge base (one-time, ~30-60 min)
+docker compose exec app python scripts/import_medrag.py
+
+# UI:  http://localhost:8000/ui
+# API: http://localhost:8000/api/health
+```
+
+### Option B — Local development
+
+```bash
+# Start backing services only
+docker run -d -p 5432:5432 -e POSTGRES_DB=clinical_rag -e POSTGRES_PASSWORD=password postgres:16-alpine
+docker run -d -p 6379:6379 redis:7-alpine
+
+# Install dependencies
+conda create -n clinical-rag python=3.11 -y
+conda activate clinical-rag
+pip install -r requirements.txt
+
+# Configure
+cp project/.env.example project/.env  # add GOOGLE_API_KEY
+
+cd project
+python app.py
+# UI: http://localhost:8000/ui
+```
+
+---
 
 ## Knowledge Base
 
-The knowledge base is built from [MedRAG/textbooks](https://huggingface.co/datasets/MedRAG/textbooks), a curated collection of medical textbook content.
-
-### Included Textbooks (18)
+18 medical textbooks from [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG), totalling 350K+ indexed chunks.
 
 | Textbook | Domain | Chunks |
-|----------|--------|--------|
-| Harrison's (Internal Medicine) | Internal Medicine | 32,628 |
+|----------|--------|-------:|
+| Harrison's Internal Medicine | Internal Medicine | 32,628 |
 | Surgery (Schwartz) | Surgery | 14,349 |
 | Neurology (Adams) | Neurology | 12,370 |
 | Obstetrics (Williams) | Obstetrics | 9,166 |
@@ -181,163 +266,107 @@ The knowledge base is built from [MedRAG/textbooks](https://huggingface.co/datas
 | First Aid Step 2 | Clinical Review | 1,369 |
 | First Aid Step 1 | Basic Sciences | 850 |
 | Pathoma (Husain) | Pathology | 505 |
-| **Total** | **18 textbooks** | **125K raw &rarr; 340K+ indexed chunks** |
+| **Total** | **18 textbooks** | **~350K** |
 
-### Import More Textbooks
+---
 
-```bash
-# List all available textbooks
-python scripts/import_medrag.py --list-titles
+## Deployment
 
-# Preview import (no writes)
-python scripts/import_medrag.py --titles Immunology_Janeway --dry-run
-
-# Import specific textbooks
-python scripts/import_medrag.py --titles Immunology_Janeway Neurology_Adams
-```
-
-18 textbooks are available covering anatomy, biochemistry, cell biology, gynecology, histology, immunology, internal medicine, neurology, obstetrics, pathology, pediatrics, pharmacology, physiology, psychiatry, and surgery.
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10+
-- [Docker](https://www.docker.com/) (recommended for Qdrant)
-- Google Gemini API key (free tier available) **or** [Ollama](https://ollama.com/) for local LLM
-
-### Setup
+### AWS EC2 (t3.large)
 
 ```bash
-# Clone the repository
+# On EC2 (Ubuntu 24.04)
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker ubuntu && newgrp docker
+
 git clone https://github.com/rzhang-tech/clinical-rag-agent.git
 cd clinical-rag-agent
+echo "GOOGLE_API_KEY=your-key" > .env
 
-# Create conda environment
-conda create -n clinical-rag python=3.11 -y
-conda activate clinical-rag
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Copy environment config
-cp project/.env.example project/.env
-# Edit project/.env with your API key
+docker compose up -d --build
+docker compose exec app python scripts/import_medrag.py
 ```
 
-### Start Qdrant (Docker)
-
-```bash
-docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant
-```
-
-> **Note**: Qdrant also supports a local file-based mode (no Docker needed), but Docker mode is recommended for datasets over 20K points for better performance.
-
-### Import Knowledge Base
-
-```bash
-cd project
-python scripts/import_medrag.py --titles Anatomy_Gray InternalMed_Harrison Pathology_Robbins Pharmacology_Katzung First_Aid_Step2 Neurology_Adams Surgery_Schwartz Pediatrics_Nelson Immunology_Janeway Histology_Ross Gynecology_Novak Obstentrics_Williams Psichiatry_DSM-5 Biochemistry_Lippinco Cell_Biology_Alberts Physiology_Levy First_Aid_Step1 Pathoma_Husain
-```
-
-### Run
-
-```bash
-python app.py
-```
-
-Open `http://localhost:7860` in your browser.
-
-## Usage
-
-1. **Ask Questions** &mdash; Go to the "Chat" tab, ask clinical questions like:
-   - *"What are the major structures of the heart?"*
-   - *"What is the first-line treatment for type 2 diabetes?"*
-   - *"Describe the mechanism of action of ACE inhibitors"*
-   - *"What are the contraindications for metformin?"*
-2. **Upload Additional Documents** &mdash; Go to the "Documents" tab to upload clinical PDFs
-3. **Review Sources** &mdash; Every answer includes source document citations
-
-## Configuration
-
-### LLM Provider
-
-Edit `project/.env`:
-
-```bash
-# Google Gemini (recommended)
-LLM_PROVIDER=gemini
-GOOGLE_API_KEY=your-api-key-here
-
-# Ollama (local, requires GPU)
-LLM_PROVIDER=ollama
-```
-
-### Key Parameters
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `LLM_MODEL_GEMINI` | `gemini-2.5-flash` | Gemini model |
-| `LLM_MODEL_OLLAMA` | `qwen3:4b` | Local Ollama model |
-| `DENSE_MODEL` | `all-mpnet-base-v2` | Dense embedding model |
-| `SPARSE_MODEL` | `Qdrant/bm25` | Sparse embedding (BM25) |
-| `CHILD_CHUNK_SIZE` | `500` | Child chunk token size |
-| `MIN_PARENT_SIZE` / `MAX_PARENT_SIZE` | `2000` / `4000` | Parent chunk size range |
-| `MAX_TOOL_CALLS` | `8` | Max retrieval tool calls per agent run |
-| `MAX_ITERATIONS` | `10` | Max agent loop iterations |
-
-### Observability (Optional)
-
-Enable [Langfuse](https://langfuse.com/) tracing:
-
-```bash
-LANGFUSE_ENABLED=true
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-```
+---
 
 ## Project Structure
 
 ```
 clinical-rag-agent/
-├── README.md
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt
-├── project/
-│   ├── app.py                      # Entry point (Gradio UI)
-│   ├── config.py                   # Central configuration
-│   ├── document_chunker.py         # Parent-child chunking
-│   ├── utils.py                    # PDF conversion utilities
-│   ├── core/
-│   │   ├── rag_system.py           # System bootstrap + LLM provider selection
-│   │   ├── document_manager.py     # Document ingestion
-│   │   ├── chat_interface.py       # Agent graph wrapper
-│   │   └── observability.py        # Langfuse tracing
-│   ├── db/
-│   │   ├── vector_db_manager.py    # Qdrant hybrid search (dense + sparse)
-│   │   └── parent_store_manager.py # Parent chunk storage
-│   ├── rag_agent/
-│   │   ├── graph.py                # LangGraph workflow definition
-│   │   ├── graph_state.py          # State schemas
-│   │   ├── nodes.py                # Node implementations (orchestrator, compress, etc.)
-│   │   ├── edges.py                # Routing logic
-│   │   ├── prompts.py              # Medical-aware system prompts
-│   │   ├── tools.py                # Retrieval tools + cross-encoder reranking
-│   │   └── schemas.py              # Pydantic schemas
-│   ├── scripts/
-│   │   ├── import_medrag.py        # MedRAG textbook importer
-│   │   └── evaluate.py             # MedQA evaluation pipeline
-│   ├── eval_results/               # Evaluation JSON outputs
-│   └── ui/
-│       ├── gradio_app.py           # Gradio interface
-│       └── css.py                  # UI styling
+└── project/
+    ├── app.py                      # Entry point (FastAPI + Gradio mounted at /ui)
+    ├── config.py                   # Central configuration
+    ├── api/
+    │   ├── main.py                 # FastAPI app factory + lifespan
+    │   ├── schemas.py              # Pydantic request/response models
+    │   └── routes/
+    │       ├── chat.py             # /api/chat, /api/chat/stream
+    │       ├── documents.py        # /api/documents
+    │       └── health.py           # /api/health
+    ├── core/
+    │   ├── rag_system.py           # System bootstrap + process-level singleton
+    │   ├── chat_interface.py       # Agent graph wrapper (Gradio path)
+    │   ├── document_manager.py     # Document ingestion
+    │   └── observability.py        # Langfuse tracing
+    ├── db/
+    │   ├── vector_db_manager.py    # Qdrant hybrid search + Redis embedding cache
+    │   ├── parent_store_manager.py # PostgreSQL parent chunks (JSON fallback)
+    │   ├── postgres_manager.py     # PostgreSQL DDL + CRUD
+    │   └── cache_manager.py        # Redis client + CachedEmbeddings
+    ├── rag_agent/
+    │   ├── graph.py                # LangGraph workflow (11 nodes)
+    │   ├── graph_state.py          # State schemas
+    │   ├── nodes.py                # Node implementations
+    │   ├── edges.py                # Conditional routing logic
+    │   ├── prompts.py              # Medical-aware system prompts
+    │   ├── tools.py                # Retrieval tools + cross-encoder singleton
+    │   └── schemas.py              # Pydantic schemas
+    ├── scripts/
+    │   ├── import_medrag.py        # MedRAG textbook importer
+    │   ├── evaluate.py             # MedQA evaluation → PostgreSQL metrics
+    │   ├── migrate_parent_store.py # One-time JSON → PostgreSQL migration
+    │   └── upload_qdrant_to_remote.py  # Local → remote Qdrant migration
+    └── ui/
+        ├── gradio_app.py           # Gradio chat + document management UI
+        └── css.py                  # UI styling
 ```
+
+---
+
+## Configuration
+
+```bash
+# project/.env
+LLM_PROVIDER=gemini           # or "ollama"
+GOOGLE_API_KEY=...
+
+# Set by docker-compose automatically:
+QDRANT_URL=http://qdrant:6333
+POSTGRES_URL=postgresql://postgres:password@postgres:5432/clinical_rag
+REDIS_URL=redis://redis:6379
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DENSE_MODEL` | `all-mpnet-base-v2` | 768-dim dense embedding model |
+| `SPARSE_MODEL` | `Qdrant/bm25` | BM25 sparse embeddings |
+| `LLM_MODEL_GEMINI` | `gemini-2.5-flash` | Cloud LLM |
+| `MAX_TOOL_CALLS` | `8` | Max retrieval calls per agent run |
+| `REDIS_LLM_TTL` | `3600` | LLM response cache TTL (seconds) |
+
+---
+
+## Acknowledgments
+
+- Architecture inspired by [Agentic RAG for Dummies](https://github.com/GiovanniPasq/agentic-rag-for-dummies)
+- Medical knowledge base from [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG)
+- Evaluation benchmark from [MedQA](https://github.com/jind11/MedQA)
+
+---
 
 ## License
 
 MIT
-
-## Acknowledgments
-
-- Architecture based on [Agentic RAG for Dummies](https://github.com/GiovanniPasq/agentic-rag-for-dummies) by Giovanni Pasquariello
-- Medical knowledge base from [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG) textbooks dataset
-- Evaluation benchmark from [MedQA](https://github.com/jind11/MedQA) (USMLE-style questions)
