@@ -1,23 +1,48 @@
 """
-Clinical RAG Agent Evaluation Script
+Clinical RAG Agent — Evaluation (v2)
 
-Uses MedQA (USMLE-style multiple choice) questions to evaluate:
-1. Answer Accuracy - does the agent pick the correct answer?
-2. Retrieval Quality - does the agent find relevant documents?
-3. Boundary Awareness - does the agent refuse when knowledge is missing?
+Measures what actually matters for a retrieval system and reports numbers that
+survive scrutiny:
+
+  1. Answer accuracy on MedQA (USMLE-style MCQ), with a 95% Wilson confidence
+     interval so a reader knows the uncertainty given the sample size.
+  2. RAG vs. no-RAG ablation — the same model answering the same questions with
+     retrieval ON (full agent) and OFF (LLM parametric knowledge only). The gap
+     is the only honest evidence that the retrieval stack adds value, since a
+     strong LLM can answer many MCQs from memory.
+  3. Robust answer extraction: fast regex first, LLM-judge fallback when the
+     regex is ambiguous (the old version silently scored un-parseable answers as
+     wrong, deflating accuracy).
+  4. Resumable runs: every question is appended to a JSONL checkpoint as it
+     finishes, so a crash 8 hours into a full-set run loses nothing.
+
+What was DELETED from v1 and why:
+  - The keyword-based in-KB / out-KB classifier. It labelled pediatrics,
+    psychiatry, obstetrics and gynecology as "out of knowledge base" — but those
+    textbooks ARE in the KB (Nelson, DSM-5, Williams, Novak). Every metric built
+    on that split was methodologically invalid. Boundary/refusal evaluation needs
+    a properly constructed out-of-domain probe set; that is future work, not a
+    keyword guess. See `--ood-note`.
 
 Usage:
-    python scripts/evaluate.py                    # Run with defaults (20 questions)
-    python scripts/evaluate.py --num-questions 50 # Run 50 questions
-    python scripts/evaluate.py --dry-run          # Preview questions without querying agent
+    python scripts/evaluate.py --mode both --sample 20          # smoke test
+    python scripts/evaluate.py --mode both --full               # full test set (~1273 q)
+    python scripts/evaluate.py --mode both --sample 300 --seeds 3   # 3-seed subset, mean±std
+    python scripts/evaluate.py --mode rag --full --concurrency 6
+    python scripts/evaluate.py --resume <run_id>                # continue an interrupted run
 """
 
 import sys
 import os
+import re
 import json
+import math
 import time
 import argparse
+import threading
+import statistics
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -25,307 +50,416 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from datasets import load_dataset
-from langchain_core.messages import HumanMessage
-from core.rag_system import RAGSystem
+from langchain_core.messages import HumanMessage, SystemMessage
+
+EVAL_DIR = os.path.join(os.path.dirname(__file__), "..", "eval_results")
 
 
-# --- Topics covered by our knowledge base ---
-IN_KB_TOPICS = {
-    "anatomy", "cardiovascular", "heart", "blood", "vessel", "artery", "vein",
-    "internal medicine", "diabetes", "hypertension", "hepatitis", "renal",
-    "liver", "kidney", "lung", "pulmonary", "cardiac", "gastrointestinal",
-    "pathology", "neoplasm", "tumor", "cancer", "inflammation", "necrosis",
-    "pharmacology", "drug", "medication", "antibiotic", "receptor", "inhibitor",
-    "clinical", "diagnosis", "treatment", "therapy", "symptom", "sign",
-}
+# --------------------------------------------------------------------------- #
+# Dataset                                                                       #
+# --------------------------------------------------------------------------- #
 
-# Topics NOT in our knowledge base
-OUT_KB_TOPICS = {
-    "pediatric", "child", "infant", "neonatal", "newborn",
-    "psychiatric", "depression", "schizophrenia", "bipolar", "anxiety disorder",
-    "obstetric", "pregnancy", "labor", "delivery", "prenatal",
-    "gynecology", "cervical", "ovarian", "uterine",
-}
+def load_medqa_questions(sample: int = 0, seed: int = 42):
+    """Load MedQA test questions.
 
-
-def classify_question(question_text: str, options: dict) -> str:
-    """Classify whether a question is likely in-KB or out-KB."""
-    text = (question_text + " " + " ".join(options.values())).lower()
-
-    out_score = sum(1 for kw in OUT_KB_TOPICS if kw in text)
-    in_score = sum(1 for kw in IN_KB_TOPICS if kw in text)
-
-    if out_score > in_score:
-        return "out_kb"
-    return "in_kb"
-
-
-def load_medqa_questions(num_in_kb: int = 15, num_out_kb: int = 5, seed: int = 42):
-    """Load a balanced set of MedQA questions."""
-    print("Loading MedQA dataset from HuggingFace...")
+    sample=0 -> the full test split (the whole population; a single run is
+    enough and a Wilson CI captures the residual uncertainty).
+    sample>0 -> a deterministic random subset of size `sample` for that seed.
+    """
+    print(f"Loading MedQA test split (sample={sample or 'FULL'}, seed={seed})...")
     ds = load_dataset("openlifescienceai/medqa", split="test")
 
-    in_kb_questions = []
-    out_kb_questions = []
-
+    entries = []
     for item in ds:
         data = item["data"]
-        question = data["Question"]
-        options = data["Options"]
-        answer_key = data["Correct Option"]
-        answer_text = data["Correct Answer"]
+        entries.append({
+            "question": data["Question"],
+            "options": data["Options"],
+            "correct_answer_key": data["Correct Option"],
+            "correct_answer_text": data["Correct Answer"],
+        })
 
-        category = classify_question(question, options)
+    if sample and sample < len(entries):
+        import random
+        rng = random.Random(seed)
+        entries = rng.sample(entries, sample)
 
-        entry = {
-            "question": question,
-            "options": options,
-            "correct_answer_key": answer_key,
-            "correct_answer_text": answer_text,
-            "category": category,
-        }
-
-        if category == "in_kb" and len(in_kb_questions) < num_in_kb:
-            in_kb_questions.append(entry)
-        elif category == "out_kb" and len(out_kb_questions) < num_out_kb:
-            out_kb_questions.append(entry)
-
-        if len(in_kb_questions) >= num_in_kb and len(out_kb_questions) >= num_out_kb:
-            break
-
-    all_questions = in_kb_questions + out_kb_questions
-    print(f"  Selected {len(in_kb_questions)} in-KB + {len(out_kb_questions)} out-KB = {len(all_questions)} questions")
-    return all_questions
+    # Stable index so resume/checkpoint identity is deterministic per (seed, sample).
+    for i, e in enumerate(entries):
+        e["index"] = i
+    print(f"  {len(entries)} questions loaded")
+    return entries
 
 
 def format_mcq_prompt(question: str, options: dict) -> str:
-    """Format a multiple-choice question for the agent."""
     options_text = "\n".join(f"  {key}. {val}" for key, val in sorted(options.items()))
     return (
         f"{question}\n\n"
         f"Options:\n{options_text}\n\n"
-        f"Select the single best answer and explain your reasoning based on the retrieved evidence. "
-        f"State your final answer as: **Answer: X**"
+        f"Select the single best answer and explain your reasoning. "
+        f"State your final answer on its own line as: **Answer: X**"
     )
 
 
-def extract_answer_choice(response: str, valid_keys: list) -> str:
-    """Extract the chosen answer letter from agent response."""
-    import re
+# --------------------------------------------------------------------------- #
+# Answer extraction: regex fast-path + LLM-judge fallback                       #
+# --------------------------------------------------------------------------- #
 
-    # Ordered from most explicit to least explicit
-    patterns = [
-        r"\*\*Answer:\s*([A-Z])\*\*",                    # **Answer: B**
-        r"Answer:\s*([A-Z])\b",                           # Answer: B
-        r"(?:correct|best)\s+answer\s+is\s+\(?([A-Z])\)?\b",  # correct answer is B / (B)
-        r"(?:option|choice)\s+\(?([A-Z])\)?\s+is\s+correct",  # option B is correct
-        r"\b([A-Z])\)\s",                                 # B) ...
-        r"^\s*\(?([A-Z])\)?\.\s",                         # A. ... at start of line
-    ]
+_EXTRACT_PATTERNS = [
+    r"\*\*Answer:\s*([A-Z])\*\*",
+    r"Answer:\s*([A-Z])\b",
+    r"(?:correct|best)\s+answer\s+is\s+\(?([A-Z])\)?\b",
+    r"(?:option|choice)\s+\(?([A-Z])\)?\s+is\s+correct",
+]
 
-    for pattern in patterns:
+
+def extract_answer_regex(response: str, valid_keys: list) -> str:
+    for pattern in _EXTRACT_PATTERNS:
         matches = re.findall(pattern, response, re.IGNORECASE | re.MULTILINE)
-        if matches:
-            choice = matches[-1].upper()
+        for m in reversed(matches):
+            choice = m.upper()
             if choice in valid_keys:
                 return choice
-
-    # Fallback: use LLM-as-judge via simple heuristic
-    # Count how many times each option letter appears in bold or standalone
-    option_counts = {}
-    for key in valid_keys:
-        # Count prominent mentions: bold, parenthesized, or "Option X"
-        count = len(re.findall(rf"\*\*{key}\*\*|\({key}\)|Option\s+{key}\b", response))
-        if count > 0:
-            option_counts[key] = count
-
-    if option_counts:
-        return max(option_counts, key=option_counts.get)
-
     return "UNKNOWN"
 
 
-def judge_boundary_awareness(response: str) -> bool:
-    """Check if the agent appropriately refused to answer (for out-KB questions)."""
-    refusal_phrases = [
-        "couldn't find",
-        "could not find",
-        "no relevant",
-        "not available",
-        "no information",
-        "outside",
-        "not covered",
-        "insufficient",
-        "unable to find",
-    ]
-    response_lower = response.lower()
-    return any(phrase in response_lower for phrase in refusal_phrases)
+def extract_answer_llm(judge_llm, response: str, question: str, options: dict, valid_keys: list) -> str:
+    """LLM-judge fallback: read the agent's prose and report which option it chose.
+    This judges *extraction only* (which letter did the answer settle on), not
+    correctness — so it cannot inflate accuracy, only recover un-parseable picks.
+    """
+    options_text = "\n".join(f"{k}. {v}" for k, v in sorted(options.items()))
+    sys_msg = SystemMessage(content=(
+        "You are an answer-extraction tool. Given a multiple-choice question and a "
+        "candidate response, output ONLY the single letter of the option the response "
+        "concludes is correct. If the response makes no clear choice, output NONE. "
+        "Output exactly one token: a letter or NONE."
+    ))
+    human = HumanMessage(content=(
+        f"QUESTION:\n{question}\n\nOPTIONS:\n{options_text}\n\n"
+        f"RESPONSE:\n{response}\n\nWhich option did the response choose?"
+    ))
+    try:
+        out = judge_llm.invoke([sys_msg, human]).content.strip().upper()
+        m = re.search(r"[A-Z]", out)
+        if m and m.group(0) in valid_keys:
+            return m.group(0)
+    except Exception:
+        pass
+    return "UNKNOWN"
 
 
-def run_evaluation(num_in_kb: int = 15, num_out_kb: int = 5, dry_run: bool = False):
-    """Run the full evaluation pipeline."""
+_SOURCE_HINT = re.compile(r"(parent id|file name|source[s]?:|\.md\b|textbook)", re.IGNORECASE)
 
-    # Load questions
-    questions = load_medqa_questions(num_in_kb=num_in_kb, num_out_kb=num_out_kb)
 
-    if dry_run:
-        print("\n[DRY RUN] Preview of selected questions:\n")
-        for i, q in enumerate(questions, 1):
-            print(f"  {i}. [{q['category']}] {q['question'][:80]}...")
-            print(f"     Correct: {q['correct_answer_key']}. {q['correct_answer_text']}")
-        print(f"\nTotal: {len(questions)} questions")
+def has_source_attribution(response: str) -> bool:
+    """Heuristic: does the answer cite where it came from? Weak signal, reported
+    separately from accuracy and never folded into the headline number."""
+    return bool(_SOURCE_HINT.search(response))
+
+
+# --------------------------------------------------------------------------- #
+# Statistics: Wilson score interval (closed-form, no scipy)                      #
+# --------------------------------------------------------------------------- #
+
+def wilson_ci(correct: int, total: int, z: float = 1.96):
+    if total == 0:
+        return (0.0, 0.0, 0.0)
+    p = correct / total
+    denom = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denom
+    margin = (z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total))) / denom
+    return (round(100 * p, 1), round(100 * (center - margin), 1), round(100 * (center + margin), 1))
+
+
+# --------------------------------------------------------------------------- #
+# Runners                                                                        #
+# --------------------------------------------------------------------------- #
+
+def _retry(fn, attempts: int = 4, base: float = 2.0):
+    """Exponential backoff — survives Gemini rate-limit / transient 5xx so a
+    long run does not die on a single 429."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            msg = str(exc).lower()
+            if any(t in msg for t in ("429", "rate", "quota", "resource", "503", "unavailable",
+                                       "timeout", "422", "grammar", "failed to compile")):
+                time.sleep(base ** i)
+                continue
+            raise
+    raise last
+
+
+def run_rag(rag_system, judge_llm, q: dict) -> dict:
+    import uuid
+    from langchain_core.messages import HumanMessage as HM
+
+    prompt = format_mcq_prompt(q["question"], q["options"])
+    valid_keys = list(q["options"].keys())
+    thread_id = str(uuid.uuid4())
+    cfg = {"configurable": {"thread_id": thread_id}, "recursion_limit": rag_system.recursion_limit}
+
+    start = time.time()
+    try:
+        result = _retry(lambda: rag_system.agent_graph.invoke(
+            {"messages": [HM(content=prompt)]}, cfg))
+        response = result["messages"][-1].content
+    except Exception as exc:  # noqa: BLE001
+        return {**_base_row(q, "rag"), "agent_choice": "ERROR",
+                "elapsed_seconds": round(time.time() - start, 1),
+                "response": f"ERROR: {exc}"}
+
+    chosen = extract_answer_regex(response, valid_keys)
+    if chosen == "UNKNOWN":
+        chosen = extract_answer_llm(judge_llm, response, q["question"], q["options"], valid_keys)
+
+    return {**_base_row(q, "rag"),
+            "agent_choice": chosen,
+            "is_correct": chosen == q["correct_answer_key"],
+            "has_sources": has_source_attribution(response),
+            "elapsed_seconds": round(time.time() - start, 1),
+            "response": response}
+
+
+_NORAG_SYS = SystemMessage(content=(
+    "You are a medical exam assistant. Answer the multiple-choice question using "
+    "your own knowledge. Reason briefly, then state your final answer on its own "
+    "line as: **Answer: X**"
+))
+
+
+def run_norag(norag_llm, judge_llm, q: dict) -> dict:
+    prompt = format_mcq_prompt(q["question"], q["options"])
+    valid_keys = list(q["options"].keys())
+    start = time.time()
+    try:
+        response = _retry(lambda: norag_llm.invoke([_NORAG_SYS, HumanMessage(content=prompt)]).content)
+    except Exception as exc:  # noqa: BLE001
+        return {**_base_row(q, "norag"), "agent_choice": "ERROR",
+                "elapsed_seconds": round(time.time() - start, 1),
+                "response": f"ERROR: {exc}"}
+
+    chosen = extract_answer_regex(response, valid_keys)
+    if chosen == "UNKNOWN":
+        chosen = extract_answer_llm(judge_llm, response, q["question"], q["options"], valid_keys)
+
+    return {**_base_row(q, "norag"),
+            "agent_choice": chosen,
+            "is_correct": chosen == q["correct_answer_key"],
+            "has_sources": False,
+            "elapsed_seconds": round(time.time() - start, 1),
+            "response": response}
+
+
+def _base_row(q: dict, mode: str) -> dict:
+    return {
+        "index": q["index"],
+        "mode": mode,
+        "question": q["question"],
+        "correct_answer": f"{q['correct_answer_key']}. {q['correct_answer_text']}",
+        "correct_key": q["correct_answer_key"],
+        "agent_choice": "UNKNOWN",
+        "is_correct": False,
+        "has_sources": False,
+        "elapsed_seconds": 0.0,
+        "response": "",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Checkpointed orchestration                                                     #
+# --------------------------------------------------------------------------- #
+
+_write_lock = threading.Lock()
+
+
+def _load_done(jsonl_path: str) -> set:
+    done = set()
+    if not os.path.exists(jsonl_path):
+        return done
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+                done.add((r["mode"], r["index"]))
+            except Exception:
+                continue
+    return done
+
+
+def _append(jsonl_path: str, row: dict):
+    with _write_lock:
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def run_condition(mode: str, questions, runner, jsonl_path: str, concurrency: int, limit: int = 0):
+    done = _load_done(jsonl_path)
+    todo = [q for q in questions if (mode, q["index"]) not in done]
+    already = len(questions) - len(todo)
+    if limit and len(todo) > limit:
+        todo = todo[:limit]  # run only this batch; checkpoint remembers the rest
+    print(f"\n[{mode}] running {len(todo)} this batch, {already} already done, "
+          f"{len(questions) - already - len(todo)} remaining after this batch")
+
+    results = []
+    completed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(runner, q): q for q in todo}
+        for fut in as_completed(futures):
+            row = fut.result()
+            _append(jsonl_path, row)
+            results.append(row)
+            completed += 1
+            status = "OK " if row["is_correct"] else ("ERR" if row["agent_choice"] == "ERROR" else "x  ")
+            print(f"  [{mode} {completed}/{len(todo)}] {status} "
+                  f"pick={row['agent_choice']} gold={row.get('correct_key','?')} "
+                  f"{row['elapsed_seconds']}s")
+
+    # Merge with anything already on disk so the summary reflects the full set.
+    all_rows = []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                all_rows.append(json.loads(line))
+            except Exception:
+                continue
+    return [r for r in all_rows if r["mode"] == mode]
+
+
+def summarize(mode: str, rows: list) -> dict:
+    scored = [r for r in rows if r["agent_choice"] != "ERROR"]
+    errors = len(rows) - len(scored)
+    correct = sum(1 for r in scored if r["is_correct"])
+    acc, lo, hi = wilson_ci(correct, len(scored))
+    avg_t = round(sum(r["elapsed_seconds"] for r in rows) / len(rows), 1) if rows else 0
+    src = sum(1 for r in scored if r.get("has_sources"))
+    return {
+        "mode": mode, "n": len(rows), "scored": len(scored), "errors": errors,
+        "correct": correct, "accuracy": acc, "ci95_low": lo, "ci95_high": hi,
+        "source_rate": round(100 * src / len(scored), 1) if scored else 0,
+        "avg_time_seconds": avg_t,
+    }
+
+
+def print_summary(summaries: dict):
+    print("\n" + "=" * 64)
+    print("EVALUATION SUMMARY")
+    print("=" * 64)
+    for s in summaries.values():
+        print(f"\n[{s['mode'].upper()}]  n={s['n']}  (scored={s['scored']}, errors={s['errors']})")
+        print(f"  Accuracy:        {s['accuracy']}%  (95% CI {s['ci95_low']}–{s['ci95_high']})")
+        print(f"  Correct:         {s['correct']}/{s['scored']}")
+        if s["mode"] == "rag":
+            print(f"  Source-cited:    {s['source_rate']}%")
+        print(f"  Avg time/q:      {s['avg_time_seconds']}s")
+
+    if "rag" in summaries and "norag" in summaries:
+        r, n = summaries["rag"], summaries["norag"]
+        delta = round(r["accuracy"] - n["accuracy"], 1)
+        print("\n" + "-" * 64)
+        print("ABLATION — retrieval contribution")
+        print(f"  RAG ON:  {r['accuracy']}%   RAG OFF: {n['accuracy']}%")
+        sign = "+" if delta >= 0 else ""
+        print(f"  Δ (retrieval effect): {sign}{delta} pts")
+        print("  (Honest headline: RAG lifts MedQA accuracy by the Δ above; "
+              "CIs show whether the gap is significant at this n.)")
+    print("=" * 64)
+
+
+# --------------------------------------------------------------------------- #
+# Main                                                                           #
+# --------------------------------------------------------------------------- #
+
+def run_once(modes, questions, run_id: str, concurrency: int, seed_tag: str = "", limit: int = 0):
+    os.makedirs(EVAL_DIR, exist_ok=True)
+    summaries = {}
+
+    # Lazy init — only build what each mode needs.
+    rag_system = judge_llm = norag_llm = None
+    if "rag" in modes or "norag" in modes:
+        from core.rag_system import _create_llm
+        judge_llm = _create_llm()
+        norag_llm = _create_llm()
+    if "rag" in modes:
+        from core.rag_system import RAGSystem
+        print("\nInitializing RAG system (Qdrant + parent store + agent graph)...")
+        rag_system = RAGSystem()
+        rag_system.initialize()
+
+    for mode in modes:
+        jsonl = os.path.join(EVAL_DIR, f"{run_id}{seed_tag}_{mode}.jsonl")
+        if mode == "rag":
+            runner = lambda q: run_rag(rag_system, judge_llm, q)  # noqa: E731
+            # Agent graph + shared cross-encoder: cap concurrency (docker Qdrant server handles it).
+            cc = min(concurrency, 8)
+        else:
+            runner = lambda q: run_norag(norag_llm, judge_llm, q)  # noqa: E731
+            cc = concurrency
+        rows = run_condition(mode, questions, runner, jsonl, cc, limit)
+        summaries[mode] = summarize(mode, rows)
+
+    return summaries
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Clinical RAG Agent evaluation (v2)")
+    ap.add_argument("--mode", choices=["rag", "norag", "both"], default="both")
+    ap.add_argument("--full", action="store_true", help="Run the entire MedQA test split")
+    ap.add_argument("--sample", type=int, default=20, help="Subset size (ignored if --full)")
+    ap.add_argument("--seeds", type=int, default=1, help="Number of seeds for subset runs (mean±std)")
+    ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--limit", type=int, default=0, help="Run only N not-yet-done questions this invocation (batching)")
+    ap.add_argument("--resume", type=str, default="", help="Resume an existing run_id")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    modes = ["rag", "norag"] if args.mode == "both" else [args.mode]
+    sample = 0 if args.full else args.sample
+    run_id = args.resume or datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if args.dry_run:
+        qs = load_medqa_questions(sample=sample or 5, seed=42)
+        for q in qs[:5]:
+            print(f"  [{q['index']}] {q['question'][:80]}...  -> {q['correct_answer_key']}")
         return
 
-    # Initialize RAG system
-    print("\nInitializing RAG system...")
-    rag_system = RAGSystem()
-    rag_system.initialize()
+    # Full set or single-seed: one pass. Multi-seed only makes sense for subsets.
+    seeds = [42] if (args.full or args.seeds <= 1) else [42 + i for i in range(args.seeds)]
 
-    # Run evaluation
-    results = []
-    total = len(questions)
+    per_seed = []
+    for si, seed in enumerate(seeds):
+        seed_tag = "" if len(seeds) == 1 else f"_s{seed}"
+        if len(seeds) > 1:
+            print(f"\n########## SEED {seed} ({si+1}/{len(seeds)}) ##########")
+        questions = load_medqa_questions(sample=sample, seed=seed)
+        summaries = run_once(modes, questions, run_id, args.concurrency, seed_tag, args.limit)
+        print_summary(summaries)
+        per_seed.append(summaries)
 
-    print(f"\nRunning evaluation on {total} questions...\n")
+    # Aggregate across seeds (subset multi-seed only).
+    if len(per_seed) > 1:
+        print("\n" + "#" * 64)
+        print(f"MULTI-SEED AGGREGATE  ({len(per_seed)} seeds, n={sample} each)")
+        print("#" * 64)
+        for mode in modes:
+            accs = [ps[mode]["accuracy"] for ps in per_seed]
+            mean = round(statistics.mean(accs), 1)
+            std = round(statistics.pstdev(accs), 1) if len(accs) > 1 else 0.0
+            print(f"  [{mode}] {mean}% ± {std}  (seeds: {accs})")
 
-    for i, q in enumerate(questions, 1):
-        print(f"[{i}/{total}] [{q['category']}] {q['question'][:70]}...")
-
-        prompt = format_mcq_prompt(q["question"], q["options"])
-
-        start_time = time.time()
-        try:
-            # Reset thread for each question (independent evaluation)
-            rag_system.reset_thread()
-
-            result = rag_system.agent_graph.invoke(
-                {"messages": [HumanMessage(content=prompt)]},
-                rag_system.get_config()
-            )
-            response = result["messages"][-1].content
-            elapsed = time.time() - start_time
-
-            # Evaluate
-            valid_keys = list(q["options"].keys())
-            chosen = extract_answer_choice(response, valid_keys)
-            is_correct = chosen == q["correct_answer_key"]
-            is_refusal = judge_boundary_awareness(response)
-            has_sources = "sources:" in response.lower() or "source:" in response.lower()
-
-            results.append({
-                "index": i,
-                "category": q["category"],
-                "question": q["question"],
-                "correct_answer": f"{q['correct_answer_key']}. {q['correct_answer_text']}",
-                "agent_choice": chosen,
-                "is_correct": is_correct,
-                "is_refusal": is_refusal,
-                "has_sources": has_sources,
-                "elapsed_seconds": round(elapsed, 1),
-                "response": response,
-            })
-
-            status = "✅" if is_correct else ("🔇" if is_refusal else "❌")
-            print(f"  {status} Agent: {chosen} | Correct: {q['correct_answer_key']} | {elapsed:.1f}s")
-
-        except Exception as e:
-            elapsed = time.time() - start_time
-            print(f"  💥 Error: {str(e)[:80]} | {elapsed:.1f}s")
-            results.append({
-                "index": i,
-                "category": q["category"],
-                "question": q["question"],
-                "correct_answer": f"{q['correct_answer_key']}. {q['correct_answer_text']}",
-                "agent_choice": "ERROR",
-                "is_correct": False,
-                "is_refusal": False,
-                "has_sources": False,
-                "elapsed_seconds": round(elapsed, 1),
-                "response": f"ERROR: {str(e)}",
-            })
-
-    # Calculate metrics
-    print("\n" + "=" * 60)
-    print("EVALUATION RESULTS")
-    print("=" * 60)
-
-    in_kb = [r for r in results if r["category"] == "in_kb"]
-    out_kb = [r for r in results if r["category"] == "out_kb"]
-
-    # In-KB metrics
-    in_kb_correct = sum(1 for r in in_kb if r["is_correct"])
-    in_kb_with_sources = sum(1 for r in in_kb if r["has_sources"])
-    in_kb_accuracy = in_kb_correct / len(in_kb) * 100 if in_kb else 0
-
-    print(f"\n📚 In-KB Questions ({len(in_kb)} total):")
-    print(f"  Accuracy:         {in_kb_correct}/{len(in_kb)} ({in_kb_accuracy:.0f}%)")
-    print(f"  With Sources:     {in_kb_with_sources}/{len(in_kb)}")
-
-    # Out-KB metrics
-    out_kb_refusals = sum(1 for r in out_kb if r["is_refusal"])
-    out_kb_correct = sum(1 for r in out_kb if r["is_correct"])
-    boundary_rate = out_kb_refusals / len(out_kb) * 100 if out_kb else 0
-
-    print(f"\n🚫 Out-KB Questions ({len(out_kb)} total):")
-    print(f"  Refusal Rate:     {out_kb_refusals}/{len(out_kb)} ({boundary_rate:.0f}%)")
-    print(f"  Correct Despite:  {out_kb_correct}/{len(out_kb)} (answered correctly using general knowledge)")
-
-    # Overall
-    total_correct = in_kb_correct + out_kb_correct
-    overall_accuracy = total_correct / len(results) * 100 if results else 0
-    avg_time = sum(r["elapsed_seconds"] for r in results) / len(results) if results else 0
-
-    print(f"\n📊 Overall:")
-    print(f"  Accuracy:         {total_correct}/{len(results)} ({overall_accuracy:.0f}%)")
-    print(f"  Avg Time/Question: {avg_time:.1f}s")
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    metrics = {
-        "num_in_kb": num_in_kb,
-        "num_out_kb": num_out_kb,
-        "in_kb_accuracy": round(in_kb_accuracy, 1),
-        "in_kb_source_rate": round(in_kb_with_sources / len(in_kb) * 100, 1) if in_kb else 0,
-        "out_kb_refusal_rate": round(boundary_rate, 1),
-        "overall_accuracy": round(overall_accuracy, 1),
-        "avg_time_seconds": round(avg_time, 1),
-    }
-
-    # Persist to PostgreSQL
-    try:
-        from db.postgres_manager import PostgresManager
-        pg = PostgresManager()
-        pg.connect()
-        pg.save_eval_run(run_id=timestamp, timestamp=datetime.now().isoformat(), metrics=metrics)
-        pg.save_eval_results(run_id=timestamp, results=results)
-        pg.close()
-        print(f"\n✅ Metrics saved to PostgreSQL (run_id={timestamp})")
-    except Exception as exc:
-        print(f"\n⚠️  PostgreSQL unavailable — metrics not persisted: {exc}")
-
-    # Also save JSON as backup
-    output_dir = os.path.join(os.path.dirname(__file__), "..", "eval_results")
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"eval_{timestamp}.json")
-
-    report = {
-        "timestamp": timestamp,
-        "config": {"num_in_kb": num_in_kb, "num_out_kb": num_out_kb, "score_threshold": 0.5},
-        "metrics": metrics,
-        "results": results,
-    }
-
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-
-    print(f"💾 JSON backup saved to: {output_file}")
-    print("=" * 60)
+    # Persist a compact summary JSON next to the JSONL checkpoints.
+    summary_path = os.path.join(EVAL_DIR, f"{run_id}_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump({"run_id": run_id, "full": args.full, "sample": sample,
+                   "seeds": seeds, "per_seed": per_seed}, f, indent=2, ensure_ascii=False)
+    print(f"\nSummary written to {summary_path}")
+    print("Per-question JSONL checkpoints in", EVAL_DIR)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate Clinical RAG Agent")
-    parser.add_argument("--num-in-kb", type=int, default=15, help="Number of in-KB questions")
-    parser.add_argument("--num-out-kb", type=int, default=5, help="Number of out-KB questions")
-    parser.add_argument("--dry-run", action="store_true", help="Preview questions without running agent")
-    args = parser.parse_args()
-
-    run_evaluation(num_in_kb=args.num_in_kb, num_out_kb=args.num_out_kb, dry_run=args.dry_run)
+    main()

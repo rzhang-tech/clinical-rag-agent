@@ -16,8 +16,17 @@ CHILD_COLLECTION = "document_child_chunks"
 SPARSE_VECTOR_NAME = "sparse"
 
 # --- LLM Provider Configuration ---
+# "gemini" -> Google AI Studio (API key); "vertex" -> Vertex AI (GCP, ADC auth, billed to project credit)
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+
+# --- Vertex AI (GCP) Configuration ---
+GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
+GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+
+# --- Together AI (open-weight models) ---
+TOGETHER_API_KEY = os.environ.get("TOGETHER_API_KEY", "")
+LLM_MODEL_TOGETHER = os.environ.get("LLM_MODEL_TOGETHER", "meta-llama/Llama-3.1-8B-Instruct-Turbo")
 
 # --- Model Configuration ---
 DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"

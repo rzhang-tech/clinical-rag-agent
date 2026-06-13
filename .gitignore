@@ -12,3 +12,7 @@ eval_results/
 .cache/
 *.egg-info/
 .claude/
+
+# Internal planning / review notes — not for the public repo
+PROJECT_BRIEF_FOR_REVIEW.md
+PROJECT_PLAN_FOR_REVIEW.md

@@ -16,7 +16,24 @@ logger = logging.getLogger(__name__)
 
 
 def _create_llm():
-    if config.LLM_PROVIDER == "gemini":
+    if config.LLM_PROVIDER == "vertex":
+        # Vertex AI: billed to the GCP project (uses ADC, no API key).
+        from langchain_google_vertexai import ChatVertexAI
+        return ChatVertexAI(
+            model=config.LLM_MODEL_GEMINI,
+            temperature=config.LLM_TEMPERATURE,
+            project=config.GCP_PROJECT,
+            location=config.GCP_LOCATION,
+        )
+    elif config.LLM_PROVIDER == "together":
+        # Together AI: open-weight models (Llama, etc.) via OpenAI-compatible API.
+        from langchain_together import ChatTogether
+        return ChatTogether(
+            model=config.LLM_MODEL_TOGETHER,
+            temperature=config.LLM_TEMPERATURE,
+            together_api_key=config.TOGETHER_API_KEY,
+        )
+    elif config.LLM_PROVIDER == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             model=config.LLM_MODEL_GEMINI,

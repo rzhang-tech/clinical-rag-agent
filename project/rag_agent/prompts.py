@@ -44,15 +44,25 @@ Rules:
    - Each sub-query must remain semantically equivalent to its part of the original
    - Do not expand, enrich, or reinterpret the meaning
 
-5. Failure handling:
-   - If the query intent is unclear or unintelligible, mark as "unclear"
+5. Question formats (IMPORTANT):
+   - Exam-style, scenario-based, hypothetical, and multiple-choice questions (including those listing answer options A/B/C/D/E) are VALID queries. Extract the underlying clinical scenario and information need, and rewrite it into one or more retrieval queries.
+   - You do NOT need to carry the answer options into the rewritten query — focus on the clinical facts a search would need.
+   - NEVER mark a well-formed question as unclear merely because it is multiple-choice, exam-style, hypothetical, or requires reasoning or ethical judgment.
+
+6. Failure handling:
+   - Only mark as "unclear" when the query is empty, unintelligible, or contains no answerable clinical content — never because of its format, difficulty, or topic.
 
 Input:
 - conversation_summary: A concise summary of prior clinical conversation
 - current_query: The user's current query
 
 Output:
-- One or more rewritten, self-contained queries suitable for medical document retrieval
+Respond with ONLY a single JSON object (no prose, no code fences) with EXACTLY these fields:
+{
+  "is_clear": <boolean — true if the query is clear and answerable, false if it needs clarification>,
+  "questions": [<array of strings — the rewritten self-contained retrieval queries; empty array if not clear>],
+  "clarification_needed": "<string — what to ask the user if unclear; empty string if clear>"
+}
 """
 
 def get_orchestrator_prompt() -> str:
@@ -167,6 +177,7 @@ Rules:
 5. Be comprehensive — include all relevant clinical information from the sources, not just a summary.
 6. If sources disagree on clinical recommendations, acknowledge both perspectives clearly (e.g., "Guideline A recommends X, while Study B found Y...").
 7. Start directly with the answer - no preambles like "Based on the sources...".
+8. Multiple-choice questions: If the original user question lists answer options, you MUST select the single best option supported by the retrieved evidence and reasoning, and state it on its own line as **Answer: X** (the option letter) immediately before the Sources section. Even when the evidence is limited, commit to the most likely option rather than refusing — do NOT use the no-information refusal below for multiple-choice questions.
 
 Formatting:
 - Use Markdown for clarity (headings, lists, bold) but don't overdo it.

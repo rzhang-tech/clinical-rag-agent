@@ -33,7 +33,11 @@ def rewrite_query(state: State, llm):
 
     context_section = (f"Conversation Context:\n{conversation_summary}\n" if conversation_summary.strip() else "") + f"User Query:\n{last_message.content}\n"
 
-    llm_with_structure = llm.with_config(temperature=0.1).with_structured_output(QueryAnalysis)
+    # json_mode (plain JSON, no schema-grammar) avoids Together's grammar compiler,
+    # which fails (HTTP 422) on the QueryAnalysis schema for small open-weight models.
+    # The required fields are spelled out in get_rewrite_query_prompt().
+    llm_with_structure = llm.with_config(temperature=0.1).with_structured_output(
+        QueryAnalysis, method="json_mode")
     response = llm_with_structure.invoke([SystemMessage(content=get_rewrite_query_prompt()), HumanMessage(content=context_section)])
 
     if response.questions and response.is_clear:

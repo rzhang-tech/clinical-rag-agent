@@ -1,7 +1,7 @@
 <h1 align="center">Clinical RAG Agent</h1>
 
 <p align="center">
-  <strong>Production-ready agentic RAG system for medical literature Q&A — powered by LangGraph, FastAPI, and PostgreSQL</strong>
+  <strong>Agentic RAG for medical-literature Q&A — and a rigorous study of when retrieval helps vs. hurts</strong>
 </p>
 
 <p align="center">
@@ -26,26 +26,25 @@
 </p>
 
 <p align="center">
-  <strong>🚀 Live demo coming soon — AWS deployment in progress</strong>
+  <strong>📊 Evaluation-first project — see <a href="#evaluation">Evaluation</a> for the key findings</strong>
 </p>
 
 ---
 
 ## Overview
 
-**Clinical RAG Agent** is a production-ready retrieval-augmented generation backend for medical literature question answering. It ingests clinical textbooks, indexes them into a hybrid vector store, and answers queries with full source attribution — grounded strictly in the evidence.
+**Clinical RAG Agent** is an agentic retrieval-augmented generation system for medical-literature question answering — and, more importantly, a **rigorous evaluation study of when retrieval helps, hurts, or should be bypassed.** It ingests clinical textbooks, indexes them into a hybrid vector store, and answers queries with source attribution; the project's core contribution is a careful RAG-vs-no-RAG ablation that overturns the assumption that retrieval always improves accuracy.
 
-Built on [LangGraph](https://github.com/langchain-ai/langgraph) with an async [FastAPI](https://fastapi.tiangolo.com/) backend, PostgreSQL persistence, and Redis caching, the system is containerized with Docker and designed for cloud deployment.
+Built on [LangGraph](https://github.com/langchain-ai/langgraph) with an async [FastAPI](https://fastapi.tiangolo.com/) backend, PostgreSQL persistence, Redis caching, and Docker.
 
 ### Highlights
 
-- **87% accuracy on USMLE-style MedQA** benchmark (in-KB questions)
-- **11-node LangGraph state machine** with conditional routing, context compression, and retry logic
-- **Hybrid retrieval** (dense + BM25) with cross-encoder reranking over 350K+ indexed chunks
-- **Redis-backed cache** for embeddings and LLM responses — cuts repeat-query latency significantly
-- **PostgreSQL** for parent chunk storage and evaluation metrics tracking
-- **REST API + SSE streaming** — `/api/chat`, `/api/chat/stream`, `/api/documents`
-- **Automated evaluation pipeline** with PostgreSQL metrics tracking (67% → 87% across 3 optimization cycles)
+- **Rigorous RAG-vs-no-RAG ablation** on 1,273 MedQA questions with 95% Wilson confidence intervals — finding that retrieval *reduced* closed-book accuracy (see [Evaluation](#evaluation))
+- **Found and fixed two silent defects** via the eval: an incomplete vector index (only 4 of 18 textbooks) and a query-routing bug suppressing 22% of answers — recovering accuracy from 68.9% → 87.0%
+- **11-node LangGraph state machine** — conditional routing, context compression, fan-out, retry/fallback
+- **Hybrid retrieval** (dense + BM25) with cross-encoder reranking over **287K** indexed chunks
+- **Multi-layer evaluation**: ablation, faithfulness/groundedness, and an agent-behavior regression suite
+- **FastAPI + SSE streaming**, PostgreSQL, Redis cache, Docker Compose
 
 > **Disclaimer**: For research and educational purposes only. Not a substitute for professional medical judgment.
 
@@ -168,33 +167,53 @@ Interactive API docs: `http://localhost:8000/docs`
 
 ---
 
+## Retrieval Optimization
+
+Before full-scale evaluation, the retrieval pipeline was iterated on a development subset. The single largest quality gain came from **cross-encoder reranking** — jointly scoring query–document pairs surfaced relevant passages that bi-encoder (dense) retrieval alone had ranked too low. Other changes: lowering the retrieval score threshold (0.7 → 0.4), strengthening grounding instructions to cut off-corpus hallucination, allowing the agent to *reason over* retrieved evidence rather than only quote it (which fixed a class of "refused despite having relevant evidence" failures), and tuning the answer-extraction path and context-compression threshold to cut average latency **~26% (35.3s → 26.0s)**.
+
+> **The arc:** the "refused despite having evidence" failure addressed here is the same class of behavior later quantified and re-fixed at full scale (the 22% no-answer bug in [Evaluation](#evaluation)), and the **confident-answer vs. explicit-refusal calibration** flagged as an open problem is exactly what the faithfulness and agent-behavior suites below measure. Per-version dev-subset accuracies are intentionally *not* used as headline numbers (small n, single subset); the statistically robust full-set results follow.
+
+---
+
 ## Evaluation
 
-### MedQA Benchmark (USMLE-style)
+The central finding: **on closed-book MCQ, retrieval over public textbook knowledge did not help — it hurt — for both a strong and a weak model.** All numbers below are measured (full MedQA test set unless noted), with 95% Wilson confidence intervals.
 
-#### Iterative Optimization (20-question subset)
+### 1. RAG vs. no-RAG ablation (MedQA, n=1,273, Gemini 2.5 Flash)
 
-| Metric | v1 Baseline | v2 | v3 |
-|--------|:-----------:|:--:|:--:|
-| **In-KB Accuracy** | 67% | 80% | **87%** |
-| **Overall Accuracy** | 65% | 75% | **80%** |
-| **Avg Time / Question** | 32.1s | 35.3s | 26.4s |
+| Condition | Accuracy | 95% CI |
+|-----------|:--------:|:------:|
+| no-RAG (parametric only) | **92.4%** | 90.8–93.7 |
+| RAG, initial (with bugs) | 68.9% | 66.3–71.4 |
+| **RAG, after bug fixes** | **87.0%** | 85.0–88.7 |
 
-#### Scaled Evaluation (100 questions, 18 textbooks)
+Most of the apparent 23-point "RAG penalty" was a **silent pipeline bug** (a query-rewrite node rejecting exam-style questions + answers not committing to an option → 22% of questions returned no answer). Root-causing and fixing it recovered 68.9% → 87.0%. A **real ~5.4-point residual penalty remains and is statistically significant** — retrieval adds noise to knowledge the model already has (cf. [Mallen et al., 2023](https://aclanthology.org/2023.acl-long.546/)).
 
-| Metric | Result |
-|--------|:------:|
-| **Overall Accuracy** | **80%** |
-| **In-KB Accuracy** | 78% (62/80) |
-| **Source Attribution** | 86% (69/80) |
-| **Avg Time / Question** | 26.0s |
+A separate bug was found the same way: the vector index contained only **4 of 18 textbooks** (a silently interrupted import); re-indexing all 18 produced the 287K-chunk index used above.
 
-Evaluation results are persisted to PostgreSQL (`eval_runs` + `eval_results` tables) for tracking across optimization cycles.
+### 2. Does RAG help a weaker, deployable model? (Qwen2.5-7B, n=200)
+
+| Strategy | Accuracy |
+|----------|:--------:|
+| no-RAG | **66.5%** |
+| simple-RAG (1 retrieval + 1 answer) | 58.0% |
+| agentic-RAG (full pipeline) | 56.5% |
+
+RAG hurt the weak model **more** than the strong one (−8.5 to −10 vs −5.4), overturning the "RAG helps weaker models" expectation. A **simple-RAG ablation isolates retrieval itself — not agent complexity — as the cause** (agentic adds only ~1.5 pts of extra penalty); weaker models integrate noisy context worse (cf. RGB, [Chen et al., 2024](https://ojs.aaai.org/index.php/AAAI/article/view/29728)).
+
+### 3. Faithfulness & agent-behavior
+
+- **Faithfulness** (RAGAS-style, n=120): context relevance **0.97**, but only **22%** of answers fully grounded in retrieved evidence → the bottleneck is generation faithfulness, not retrieval.
+- **Agent-behavior regression** (14 qualitative cases): **12/14** pass — clarification, red-flag escalation, abstention, citation, fallback. Two documented gaps (over-deflection; imprecise partial-evidence abstention).
+
+### Takeaway
+
+Retrieval's value is **task-dependent**: harmful when the model already knows the answer (closed-book MCQ), valuable only for genuinely unseen / private / recent knowledge with auditable provenance. See [`project/eval_results/FINDINGS.md`](project/eval_results/FINDINGS.md) for full details.
 
 ```bash
-python scripts/evaluate.py                          # 100 questions (default)
-python scripts/evaluate.py --num-in-kb 15 --num-out-kb 5
-python scripts/evaluate.py --dry-run                # preview only
+python scripts/evaluate.py --mode both --full        # RAG vs no-RAG ablation
+python scripts/eval_faithfulness.py --sample 120      # faithfulness / groundedness
+python scripts/eval_behavior.py                       # agent-behavior regression suite
 ```
 
 ---
@@ -244,7 +263,7 @@ python app.py
 
 ## Knowledge Base
 
-18 medical textbooks from [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG), totalling 350K+ indexed chunks.
+18 medical textbooks from [MedRAG](https://github.com/Teddy-XiongGZ/MedRAG): **287,420 child chunks / 38,979 parent chunks** indexed.
 
 | Textbook | Domain | Chunks |
 |----------|--------|-------:|
@@ -266,7 +285,9 @@ python app.py
 | First Aid Step 2 | Clinical Review | 1,369 |
 | First Aid Step 1 | Basic Sciences | 850 |
 | Pathoma (Husain) | Pathology | 505 |
-| **Total** | **18 textbooks** | **~350K** |
+| **Total** | **18 textbooks** | **287,420 child** |
+
+> The per-textbook counts above are MedRAG's original source-snippet counts; after parent–child re-chunking the indexed total is **287,420 child / 38,979 parent** chunks.
 
 ---
 
